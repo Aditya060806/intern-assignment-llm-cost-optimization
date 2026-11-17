@@ -31,10 +31,43 @@ def parse_resolution(text: str) -> TicketResolution:
     )
 
 
+TOP_K = 2
+
 # JSON only, no reasoning: output tokens cost 5x input.
-_INSTRUCTIONS = """You are ShopAssist, a Tier-1 support copilot. Resolve the ticket from the order snapshot and the help center below.
-Actions: REFUND, REPLACE, SEND_ARTICLE (policy denies the request), ESCALATE_TIER2 (needs manual review).
-Reply with JSON only: {"action": "...", "kb_article": "<article id>", "customer_reply": "<one sentence>"}"""
+_INSTRUCTIONS = (
+    "You are ShopAssist, Tier-1 support. Choose REFUND, REPLACE, SEND_ARTICLE (policy says no) "
+    "or ESCALATE_TIER2 (manual review), and the article id that backs it.\n"
+    'JSON only: {"action": "", "kb_article": "", "customer_reply": "<one sentence>"}'
+)
+
+
+def _terms(text: str) -> set[str]:
+    # 6-letter prefixes, so "refunded" matches "refund" and "replacement" matches "replace"
+    return {w[:6] for w in re.findall(r"[a-z]{4,}", text.lower())}
+
+
+def article_text(aid: str) -> str:
+    return load_article(aid).replace("**", "").strip()  # bold markers are just extra tokens
+
+
+def top_articles(ticket: dict, order: dict, k: int = TOP_K) -> list[str]:
+    """Articles that share the most words with the thread, the product and its true flags."""
+    words = [m["text"] for m in ticket["messages"]]
+    words += [order.get("title", ""), order.get("product_type", "")]
+    words += [key.replace("_", " ") for key, value in order.items() if value is True]
+    query = _terms(" ".join(words))
+    overlap = {aid: len(query & _terms(article_text(aid))) for aid in article_ids()}
+    return sorted(overlap, key=overlap.get, reverse=True)[:k]
+
+
+def ticket_prompt(ticket: dict, order: dict, articles: str) -> str:
+    # order id and sku don't change the policy outcome
+    facts = {key: value for key, value in order.items() if key not in ("order_id", "sku")}
+    snapshot = json.dumps(facts, separators=(",", ":"))
+    return (
+        f"ARTICLES:\n{articles}\n\nTHREAD:\n{format_thread(ticket)}\n\n"
+        f"ORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT"
+    )
 
 
 class SupportCopilot:
@@ -52,14 +85,9 @@ class SupportCopilot:
     def build_messages(self, ticket_id: str) -> list[ChatMessage]:
         ticket = get_ticket(ticket_id)
         order = get_order(ticket["order_id"])
-        thread = format_thread(ticket)
-        snapshot = json.dumps(order, separators=(",", ":"))
-        # articles already start with "# <id>"; all_articles_blob() repeats the id in a separator line
-        help_center = "\n\n".join(load_article(aid).strip() for aid in article_ids())
-
-        system = f"{_INSTRUCTIONS}\n\nHELP CENTER:\n{help_center}"
-        user = f"THREAD:\n{thread}\n\nORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT"
-        return [ChatMessage("system", system), ChatMessage("user", user)]
+        articles = "\n\n".join(article_text(aid) for aid in top_articles(ticket, order))
+        user = ticket_prompt(ticket, order, articles)
+        return [ChatMessage("system", _INSTRUCTIONS), ChatMessage("user", user)]
 
     def handle_ticket(self, ticket_id: str) -> TicketResolution:
         messages = self.build_messages(ticket_id)
