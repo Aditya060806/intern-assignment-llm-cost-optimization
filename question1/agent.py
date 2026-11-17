@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from dataclasses import dataclass
 
 from shared.billing import CostSession
-from shared.kb import all_articles_blob
+from shared.kb import article_ids, load_article
 from shared.llm import ChatMessage, LlmClient
 from shared.tools import format_thread, get_order, get_ticket
 
@@ -32,19 +31,15 @@ def parse_resolution(text: str) -> TicketResolution:
     )
 
 
-_FEW_SHOT = """
-Example ticket resolutions (format to copy):
-
-1. Unopened headphones, day 10 → {"action":"REFUND","kb_article":"returns-within-30-days"}
-2. Ebook, license shown → {"action":"SEND_ARTICLE","kb_article":"digital-license-no-refund"}
-3. Cracked custom mug → {"action":"ESCALATE_TIER2","kb_article":"custom-items-no-replace"}
-4. Cracked stock mug, day 2 → {"action":"REPLACE","kb_article":"damage-replacement-7-days"}
-"""
+# JSON only, no reasoning: output tokens cost 5x input.
+_INSTRUCTIONS = """You are ShopAssist, a Tier-1 support copilot. Resolve the ticket from the order snapshot and the help center below.
+Actions: REFUND, REPLACE, SEND_ARTICLE (policy denies the request), ESCALATE_TIER2 (needs manual review).
+Reply with JSON only: {"action": "...", "kb_article": "<article id>", "customer_reply": "<one sentence>"}"""
 
 
 class SupportCopilot:
     """
-    ShopAssist Tier-1 copilot (baseline).
+    ShopAssist Tier-1 copilot.
 
     Given a support ticket + order snapshot, choose an action, cite the help-center
     article, and draft the customer reply.
@@ -58,28 +53,12 @@ class SupportCopilot:
         ticket = get_ticket(ticket_id)
         order = get_order(ticket["order_id"])
         thread = format_thread(ticket)
-        snapshot = json.dumps(order, indent=2)
+        snapshot = json.dumps(order, separators=(",", ":"))
+        # articles already start with "# <id>"; all_articles_blob() repeats the id in a separator line
+        help_center = "\n\n".join(load_article(aid).strip() for aid in article_ids())
 
-        system = "\n\n".join(
-            [
-                f"Run id {uuid.uuid4()}",
-                "You are ShopAssist, the Tier-1 customer support copilot.",
-                _FEW_SHOT,
-                "HELP CENTER:",
-                all_articles_blob(),
-                (
-                    "Instructions: Think step by step. Write full reasoning, quote any article "
-                    "you rely on, then output JSON with action, kb_article, customer_reply."
-                ),
-            ]
-        )
-        user = "\n\n".join(
-            [
-                f"TICKET_ID: {ticket_id}",
-                f"THREAD:\n{thread}",
-                f"ORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
-            ]
-        )
+        system = f"{_INSTRUCTIONS}\n\nHELP CENTER:\n{help_center}"
+        user = f"THREAD:\n{thread}\n\nORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT"
         return [ChatMessage("system", system), ChatMessage("user", user)]
 
     def handle_ticket(self, ticket_id: str) -> TicketResolution:
