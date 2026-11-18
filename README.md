@@ -19,7 +19,7 @@
 | Q1 points per ticket | ~8,900 | 1,244 | 1,395 | 3,000 |
 | Q2 points per ticket | ~73,400 | 1,220 | 1,371 | 2,500 |
 
-Measured on T-1001–T-1004. `action` and `kb_article` still match on all four and on the T-1091 holdout. Per-call breakdowns and write-ups: [Question 1](question1/README.md), [Question 2](question2/README.md).
+Measured on T-1001–T-1004. `action` and `kb_article` still match on all four and on the T-1091 holdout. Full write-up with per-call breakdowns: [WRITEUP.md](WRITEUP.md).
 
 `pytest -q` passes. Most of its runtime is `test_help_center_exceeds_context`, which builds the 210k-token help center and takes several minutes; the agents never build it.
 
